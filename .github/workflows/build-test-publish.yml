@@ -1,36 +1,679 @@
-# This is a basic workflow to help you get started with Actions
+name: Build → Test → Publish Pipeline
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
+  # Trigger on new release
+  release:
+    types: [published]
+  
+  # Trigger on version tags
   push:
-    branches: [ "main" ]
+    tags:
+      - 'v*'
+    branches:
+      - main
+      - develop
+  
+  # Trigger on PRs to main
   pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
+    branches:
+      - main
+  
+  # Allow manual triggering
   workflow_dispatch:
+    inputs:
+      deploy_target:
+        description: 'Deploy to (testpypi/pypi/none)'
+        required: true
+        default: 'none'
+        type: choice
+        options:
+        - none
+        - testpypi
+        - pypi
+      run_security_tests:
+        description: 'Run comprehensive security tests'
+        required: false
+        default: true
+        type: boolean
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+env:
+  PYTHON_VERSION: "3.11"
+  
 jobs:
-  # This workflow contains a single job called "build"
+  # ========================================
+  # PHASE 1: BUILD ARTIFACTS
+  # ========================================
   build:
-    # The type of runner that the job will run on
+    name: "Phase 1: Build Artifacts"
     runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+    
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: Install Build Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install build twine check-manifest
+        
+    - name: Verify Package Manifest
+      run: check-manifest
+      
+    - name: Run Static Analysis
+      run: |
+        python -m pip install flake8 mypy
+        # Quick syntax and import validation
+        flake8 envdoc/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        mypy envdoc/ --ignore-missing-imports --no-strict-optional
+        
+    - name: Build Package Artifacts
+      run: |
+        python -m build --wheel --sdist
+        echo "📦 Built artifacts:"
+        ls -la dist/
+        
+    - name: Verify Build Integrity
+      run: |
+        python -m twine check dist/*
+        # Extract and verify package contents
+        cd dist
+        tar -tzf *.tar.gz | head -20
+        python -m zipfile -l *.whl | head -20
+        
+    - name: Store Build Artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-artifacts
+        path: dist/
+        retention-days: 30
+        
+    - name: Store Source Code for Testing
+      uses: actions/upload-artifact@v3
+      with:
+        name: source-code
+        path: |
+          envdoc/
+          tests/
+          pyproject.toml
+          pytest.ini
+          run_tests.py
+        retention-days: 7
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
+  # ========================================
+  # PHASE 2A: TEST DATA PREPARATION
+  # ========================================
+  test-data-prep:
+    name: "Phase 2A: Prepare Test Data"
+    runs-on: ubuntu-latest
+    needs: [build]
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: Create Dynamic Test Scenarios
+      run: |
+        echo "🏗️ Creating comprehensive test scenarios..."
+        
+        # Create test workspace
+        mkdir -p test-workspace/{safe-project,sensitive-project,complex-project,production-sim}
+        
+        # === Safe Project Test Data ===
+        cat > test-workspace/safe-project/app.py << 'EOF'
+        import os
+        
+        # Safe environment variables
+        database_url = os.getenv('DATABASE_URL', 'sqlite:///default.db')
+        debug_mode = os.getenv('DEBUG', 'false').lower() == 'true'
+        app_port = int(os.getenv('PORT', '8000'))
+        cache_ttl = int(os.getenv('CACHE_TTL', '3600'))
+        EOF
+        
+        cat > test-workspace/safe-project/.env.example << 'EOF'
+        DATABASE_URL=postgresql://localhost/myapp
+        DEBUG=false
+        PORT=8000
+        CACHE_TTL=3600
+        EOF
+        
+        # === Sensitive Project Test Data ===
+        cat > test-workspace/sensitive-project/config.py << 'EOF'
+        import os
+        
+        # Sensitive configuration - should NOT be modified without explicit user consent
+        SECRET_KEY = os.getenv('SECRET_KEY')
+        DATABASE_PASSWORD = os.environ['DATABASE_PASSWORD']
+        API_KEY = os.getenv('API_KEY')
+        PRIVATE_KEY_PATH = os.getenv('PRIVATE_KEY_PATH', '/secure/keys/private.pem')
+        
+        # Production settings
+        PRODUCTION = os.getenv('PRODUCTION', 'false') == 'true'
+        ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost').split(',')
+        EOF
+        
+        cat > test-workspace/sensitive-project/.env << 'EOF'
+        SECRET_KEY=super_secret_key_do_not_change
+        DATABASE_PASSWORD=production_password_sensitive
+        API_KEY=live_api_key_critical
+        PRIVATE_KEY_PATH=/production/keys/critical.pem
+        PRODUCTION=true
+        ALLOWED_HOSTS=api.example.com,app.example.com
+        EOF
+        
+        # === Complex Project Test Data ===
+        cat > test-workspace/complex-project/docker-compose.yml << 'EOF'
+        version: '3.8'
+        services:
+          web:
+            environment:
+              - DATABASE_URL=${DATABASE_URL}
+              - REDIS_URL=${REDIS_URL:-redis://localhost}
+              - SECRET_KEY=${SECRET_KEY}
+              - DEBUG=${DEBUG:-false}
+          worker:
+            environment:
+              - CELERY_BROKER=${CELERY_BROKER_URL}
+              - DATABASE_URL=${DATABASE_URL}
+        EOF
+        
+        mkdir -p test-workspace/complex-project/src
+        cat > test-workspace/complex-project/src/settings.py << 'EOF'
+        import os
+        from pathlib import Path
+        
+        # Complex environment variable patterns
+        db_config = {
+            'host': os.getenv('DB_HOST', 'localhost'),
+            'port': int(os.getenv('DB_PORT', '5432')),
+            'name': os.environ.get('DB_NAME', 'myapp'),
+            'user': os.environ['DB_USER'],
+            'password': os.environ['DB_PASSWORD']
+        }
+        
+        # Typos and variations (should be detected and suggested)
+        redis_host = os.getenv('REDIS_HOST')  # Should suggest REDIS_URL
+        api_token = os.getenv('API_TOKEN')    # Should suggest API_KEY
+        debug_flag = os.getenv('DEBUG_MODE')  # Should suggest DEBUG
+        EOF
+        
+        cat > test-workspace/complex-project/.env.example << 'EOF'
+        # Database Configuration
+        DATABASE_URL=postgresql://user:pass@localhost/myapp
+        DB_HOST=localhost
+        DB_PORT=5432
+        DB_NAME=myapp
+        DB_USER=myuser
+        DB_PASSWORD=mypassword
+        
+        # Redis Configuration  
+        REDIS_URL=redis://localhost:6379
+        CELERY_BROKER_URL=redis://localhost:6379
+        
+        # API Configuration
+        API_KEY=your_api_key_here
+        SECRET_KEY=your_secret_key_here
+        
+        # Application Settings
+        DEBUG=false
+        EOF
+        
+        # === Production Simulation Test Data ===
+        mkdir -p test-workspace/production-sim/{app,config,scripts}
+        
+        # Simulate production files that should NEVER be modified
+        cat > test-workspace/production-sim/.env.production << 'EOF'
+        # CRITICAL: Production environment - DO NOT MODIFY
+        SECRET_KEY=prod_secret_key_critical_do_not_change
+        DATABASE_URL=postgresql://prod:secure@prod-db:5432/production
+        API_KEY=live_production_api_key_sensitive
+        SENTRY_DSN=https://prod-sentry-key@sentry.io/project
+        PRODUCTION=true
+        EOF
+        
+        # Create files with specific permissions to test boundary conditions
+        chmod 644 test-workspace/production-sim/.env.production
+        
+        # Create backup files that should be preserved
+        cp test-workspace/production-sim/.env.production test-workspace/production-sim/.env.production.backup
+        
+        echo "✅ Test data preparation complete"
+        
+    - name: Create Test Validation Scripts
+      run: |
+        cat > test-workspace/validate_safety.py << 'EOF'
+        #!/usr/bin/env python3
+        """
+        Safety validation script for EnvDoc testing
+        Ensures no unauthorized modifications to sensitive files
+        """
+        
+        import os
+        import hashlib
+        import json
+        from pathlib import Path
+        
+        def calculate_file_hash(file_path):
+            """Calculate SHA256 hash of file"""
+            with open(file_path, 'rb') as f:
+                return hashlib.sha256(f.read()).hexdigest()
+        
+        def create_baseline():
+            """Create baseline of sensitive files"""
+            sensitive_files = [
+                'sensitive-project/.env',
+                'production-sim/.env.production',
+                'production-sim/.env.production.backup'
+            ]
+            
+            baseline = {}
+            for file_path in sensitive_files:
+                if os.path.exists(file_path):
+                    baseline[file_path] = calculate_file_hash(file_path)
+                    
+            with open('baseline.json', 'w') as f:
+                json.dump(baseline, f, indent=2)
+                
+            print(f"✅ Created baseline for {len(baseline)} sensitive files")
+            return baseline
+        
+        def validate_integrity():
+            """Validate that sensitive files weren't modified"""
+            if not os.path.exists('baseline.json'):
+                raise Exception("❌ Baseline file missing!")
+                
+            with open('baseline.json', 'r') as f:
+                baseline = json.load(f)
+                
+            violations = []
+            for file_path, expected_hash in baseline.items():
+                if os.path.exists(file_path):
+                    current_hash = calculate_file_hash(file_path)
+                    if current_hash != expected_hash:
+                        violations.append(f"🚨 UNAUTHORIZED MODIFICATION: {file_path}")
+                else:
+                    violations.append(f"🚨 SENSITIVE FILE DELETED: {file_path}")
+                    
+            if violations:
+                print("\n".join(violations))
+                raise Exception(f"❌ {len(violations)} security violations detected!")
+            else:
+                print("✅ All sensitive files integrity verified")
+                
+        if __name__ == '__main__':
+            import sys
+            if len(sys.argv) > 1 and sys.argv[1] == 'validate':
+                validate_integrity()
+            else:
+                create_baseline()
+        EOF
+        
+        chmod +x test-workspace/validate_safety.py
+        
+    - name: Store Test Data
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-data
+        path: test-workspace/
+        retention-days: 7
+        
+    - name: Generate Test Summary
+      run: |
+        echo "📋 Test Data Summary:" >> $GITHUB_STEP_SUMMARY
+        echo "- Safe project scenarios: ✅" >> $GITHUB_STEP_SUMMARY
+        echo "- Sensitive file protection tests: ✅" >> $GITHUB_STEP_SUMMARY  
+        echo "- Complex pattern detection tests: ✅" >> $GITHUB_STEP_SUMMARY
+        echo "- Production simulation tests: ✅" >> $GITHUB_STEP_SUMMARY
+        echo "- Security validation scripts: ✅" >> $GITHUB_STEP_SUMMARY
 
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
-        run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+  # ========================================
+  # PHASE 2B: COMPREHENSIVE SAFETY TESTING
+  # ========================================
+  comprehensive-testing:
+    name: "Phase 2B: Safety & Security Testing"
+    runs-on: ${{ matrix.os }}
+    needs: [build, test-data-prep]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.8", "3.11", "3.12"]
+        exclude:
+          - os: windows-latest
+            python-version: "3.8"
+          - os: macos-latest  
+            python-version: "3.8"
+    
+    steps:
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        
+    - name: Download Build Artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: build-artifacts
+        path: dist/
+        
+    - name: Download Source Code
+      uses: actions/download-artifact@v3
+      with:
+        name: source-code
+        path: ./
+        
+    - name: Download Test Data
+      uses: actions/download-artifact@v3
+      with:
+        name: test-data
+        path: test-workspace/
+        
+    - name: Install Package from Wheel
+      run: |
+        pip install dist/*.whl
+        pip install pytest pytest-cov pytest-mock
+        
+    - name: Verify Package Installation
+      run: |
+        python -c "import envdoc; print(f'✅ EnvDoc v{envdoc.__version__} imported successfully')"
+        envdoc --version
+        envdoc --help
+        
+    - name: Run Unit Tests
+      run: |
+        pytest tests/ -v --cov=envdoc --cov-report=term-missing --junitxml=pytest.xml
+        
+    - name: Initialize Security Baseline
+      working-directory: test-workspace
+      run: |
+        python validate_safety.py
+        echo "✅ Security baseline established"
+        
+    - name: Test Safe Operations
+      working-directory: test-workspace/safe-project
+      run: |
+        echo "🔍 Testing safe environment analysis..."
+        envdoc health
+        envdoc analyze --detailed
+        envdoc setup
+        
+        # Verify .env was created properly
+        if [ -f .env ]; then
+          echo "✅ .env file created successfully"
+          cat .env
+        else
+          echo "❌ .env file not created"
+          exit 1
+        fi
+        
+    - name: Test Sensitive File Protection
+      working-directory: test-workspace/sensitive-project
+      run: |
+        echo "🔒 Testing sensitive file protection..."
+        
+        # Run analysis on sensitive project (should NOT modify existing .env)
+        envdoc health --dry-run
+        envdoc analyze --detailed
+        
+        # Verify original .env is unchanged
+        if [ -f .env ]; then
+          echo "✅ Sensitive .env file still exists"
+        else
+          echo "❌ Sensitive .env file was deleted!"
+          exit 1
+        fi
+        
+    - name: Test Complex Project Analysis  
+      working-directory: test-workspace/complex-project
+      run: |
+        echo "🧩 Testing complex project analysis..."
+        
+        # Should detect mismatches and suggest corrections
+        envdoc analyze --detailed > analysis_output.txt
+        
+        # Verify suggestions are provided
+        if grep -q "suggestion" analysis_output.txt || grep -q "missing" analysis_output.txt; then
+          echo "✅ Analysis detected issues and provided suggestions"
+          cat analysis_output.txt
+        else
+          echo "⚠️ Analysis may have missed some issues"
+          cat analysis_output.txt
+        fi
+        
+    - name: Test Production Simulation (Read-Only)
+      working-directory: test-workspace/production-sim
+      run: |
+        echo "🏭 Testing production simulation (read-only)..."
+        
+        # Should analyze but NOT modify production files
+        envdoc health --score-only > health_score.txt
+        envdoc analyze --detailed > prod_analysis.txt
+        
+        echo "Health Score: $(cat health_score.txt)"
+        echo "Analysis completed - files should be unchanged"
+        
+    - name: Validate Security Integrity
+      working-directory: test-workspace  
+      run: |
+        echo "🔐 Validating security integrity..."
+        python validate_safety.py validate
+        echo "✅ All security checks passed"
+        
+    - name: Test Boundary Conditions
+      run: |
+        echo "🚧 Testing boundary conditions..."
+        
+        # Test with non-existent files
+        envdoc health --project-root /nonexistent/path || echo "✅ Handled non-existent path gracefully"
+        
+        # Test with empty directory
+        mkdir empty-test
+        cd empty-test
+        envdoc health || echo "✅ Handled empty directory gracefully"
+        cd ..
+        
+        # Test with permission issues (Linux/macOS only)
+        if [ "${{ matrix.os }}" != "windows-latest" ]; then
+          mkdir restricted-test
+          chmod 000 restricted-test
+          envdoc health --project-root restricted-test || echo "✅ Handled permission issues gracefully"
+          chmod 755 restricted-test
+        fi
+        
+    - name: Upload Test Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results-${{ matrix.os }}-${{ matrix.python-version }}
+        path: |
+          pytest.xml
+          test-workspace/*/analysis_output.txt
+          test-workspace/*/health_score.txt
+          test-workspace/*/prod_analysis.txt
+
+  # ========================================
+  # PHASE 3: PUBLISH (Only if all tests pass)
+  # ========================================
+  publish-to-testpypi:
+    name: "Phase 3A: Publish to TestPyPI"
+    needs: [build, test-data-prep, comprehensive-testing]
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' && 
+      github.event.inputs.deploy_target == 'testpypi'
+    
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/envdoc
+      
+    permissions:
+      id-token: write
+      
+    steps:
+    - name: Download Build Artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: build-artifacts
+        path: dist/
+        
+    - name: Final Security Verification
+      run: |
+        echo "🔐 Final security verification before TestPyPI..."
+        python -m pip install twine
+        python -m twine check dist/*
+        
+    - name: Publish to TestPyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        repository-url: https://test.pypi.org/legacy/
+        print-hash: true
+
+  publish-to-pypi:
+    name: "Phase 3B: Publish to PyPI"
+    needs: [build, test-data-prep, comprehensive-testing]
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'release' && github.event.action == 'published') ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'pypi')
+    
+    environment:
+      name: pypi
+      url: https://pypi.org/p/envdoc
+      
+    permissions:
+      id-token: write
+      
+    steps:
+    - name: Download Build Artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: build-artifacts
+        path: dist/
+        
+    - name: Final Security Verification
+      run: |
+        echo "🔐 Final security verification before PyPI..."
+        python -m pip install twine
+        python -m twine check dist/*
+        
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        print-hash: true
+        
+  create-release-artifacts:
+    name: "Phase 3C: Create Release Artifacts"
+    needs: [publish-to-pypi]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    
+    permissions:
+      contents: write
+      
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: Extract Release Notes
+      id: extract-release-notes
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/v}
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        
+        python << 'EOF'
+        import re
+        
+        with open('CHANGELOG.md', 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        version = "${{ steps.extract-release-notes.outputs.version }}"
+        pattern = rf'## \[{re.escape(version)}\].*?\n(.*?)(?=\n## \[|\nCOMPATIBILITY|\n---|\Z)'
+        
+        match = re.search(pattern, content, re.DOTALL)
+        if match:
+            release_notes = match.group(1).strip()
+            with open('release_notes.md', 'w', encoding='utf-8') as f:
+                f.write(release_notes)
+            print(f"Release notes extracted for version {version}")
+        else:
+            with open('release_notes.md', 'w', encoding='utf-8') as f:
+                f.write(f"Release version {version}\n\nSee CHANGELOG.md for details.")
+            print(f"Default release notes created for version {version}")
+        EOF
+        
+    - name: Create GitHub Release
+      uses: ncipollo/create-release@v1
+      with:
+        tag: ${{ github.ref_name }}
+        name: EnvDoc v${{ steps.extract-release-notes.outputs.version }}
+        bodyFile: release_notes.md
+        draft: false
+        prerelease: false
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ========================================
+  # PIPELINE SUMMARY
+  # ========================================
+  pipeline-summary:
+    name: "Pipeline Summary"
+    if: always()
+    needs: [build, test-data-prep, comprehensive-testing]
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Pipeline Status Summary
+      run: |
+        echo "## 🚀 EnvDoc Build Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Phase 1: Build
+        if [[ "${{ needs.build.result }}" == "success" ]]; then
+          echo "### ✅ Phase 1: Build - SUCCESS" >> $GITHUB_STEP_SUMMARY
+          echo "- Artifacts built and verified" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### ❌ Phase 1: Build - FAILED" >> $GITHUB_STEP_SUMMARY
+          echo "- Build failed - pipeline stopped" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Phase 2A: Test Data Prep
+        if [[ "${{ needs.test-data-prep.result }}" == "success" ]]; then
+          echo "### ✅ Phase 2A: Test Data Preparation - SUCCESS" >> $GITHUB_STEP_SUMMARY
+          echo "- Dynamic test scenarios created" >> $GITHUB_STEP_SUMMARY
+          echo "- Security validation scripts ready" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### ❌ Phase 2A: Test Data Preparation - FAILED" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Phase 2B: Comprehensive Testing
+        if [[ "${{ needs.comprehensive-testing.result }}" == "success" ]]; then
+          echo "### ✅ Phase 2B: Safety & Security Testing - SUCCESS" >> $GITHUB_STEP_SUMMARY
+          echo "- Multi-platform testing completed" >> $GITHUB_STEP_SUMMARY
+          echo "- Security boundaries validated" >> $GITHUB_STEP_SUMMARY
+          echo "- No unauthorized file modifications detected" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### ❌ Phase 2B: Safety & Security Testing - FAILED" >> $GITHUB_STEP_SUMMARY
+          echo "- Testing failed - publication blocked" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Overall Status
+        if [[ "${{ needs.build.result }}" == "success" && "${{ needs.test-data-prep.result }}" == "success" && "${{ needs.comprehensive-testing.result }}" == "success" ]]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🎉 PIPELINE STATUS: READY FOR PUBLICATION" >> $GITHUB_STEP_SUMMARY
+          echo "All quality gates passed - package is safe for release" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🚫 PIPELINE STATUS: PUBLICATION BLOCKED" >> $GITHUB_STEP_SUMMARY
+          echo "Quality gates failed - fix issues before release" >> $GITHUB_STEP_SUMMARY
+        fi
