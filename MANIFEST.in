@@ -1,0 +1,28 @@
+include README.md
+include LICENSE
+include CHANGELOG.md
+include PUBLISHING.md
+include SECURITY_PIPELINE.md
+include pyproject.toml
+include pytest.ini
+include run_tests.py
+include setup.py
+
+# Include GitHub Actions workflow
+recursive-include .github/workflows *.yml *.yaml
+
+# Include package files
+recursive-include envdoc *.py *.md *.txt *.yaml *.yml
+recursive-exclude envdoc *.pyc
+recursive-exclude envdoc __pycache__
+
+exclude *.log
+exclude *.tmp
+exclude .DS_Store
+exclude Thumbs.db
+
+global-exclude *.pyc
+global-exclude __pycache__
+global-exclude .git*
+global-exclude .pytest_cache
+global-exclude .coverage
