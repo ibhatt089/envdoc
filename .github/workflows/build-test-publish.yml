@@ -87,23 +87,24 @@ jobs:
         tar -tzf *.tar.gz | head -20
         python -m zipfile -l *.whl | head -20
         
+        
     - name: Store Build Artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: build-artifacts
         path: dist/
         retention-days: 30
-        
+         
     - name: Store Source Code for Testing
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: source-code
         path: |
-          envdoc/
-          tests/
-          pyproject.toml
-          pytest.ini
-          run_tests.py
+           envdoc/
+           tests/
+           pyproject.toml
+           pytest.ini
+           run_tests.py
         retention-days: 7
 
   # ========================================
@@ -322,7 +323,7 @@ jobs:
         chmod +x test-workspace/validate_safety.py
         
     - name: Store Test Data
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: test-data
         path: test-workspace/
@@ -362,19 +363,19 @@ jobs:
         python-version: ${{ matrix.python-version }}
         
     - name: Download Build Artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: build-artifacts
         path: dist/
-        
+         
     - name: Download Source Code
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: source-code
         path: ./
-        
+         
     - name: Download Test Data
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: test-data
         path: test-workspace/
@@ -492,15 +493,15 @@ jobs:
         fi
         
     - name: Upload Test Results
-      uses: actions/upload-artifact@v3
-      if: always()
+      uses: actions/upload-artifact@v4
       with:
+        if: always()
         name: test-results-${{ matrix.os }}-${{ matrix.python-version }}
         path: |
-          pytest.xml
-          test-workspace/*/analysis_output.txt
-          test-workspace/*/health_score.txt
-          test-workspace/*/prod_analysis.txt
+           pytest.xml
+           test-workspace/*/analysis_output.txt
+           test-workspace/*/health_score.txt
+           test-workspace/*/prod_analysis.txt
 
   # ========================================
   # PHASE 3: PUBLISH (Only if all tests pass)
@@ -522,7 +523,7 @@ jobs:
       
     steps:
     - name: Download Build Artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: build-artifacts
         path: dist/
@@ -557,7 +558,7 @@ jobs:
       
     steps:
     - name: Download Build Artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: build-artifacts
         path: dist/
@@ -571,7 +572,7 @@ jobs:
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
-        print-hash: true
+        print-hash:  true
         
   create-release-artifacts:
     name: "Phase 3C: Create Release Artifacts"
@@ -616,10 +617,10 @@ jobs:
     - name: Create GitHub Release
       uses: ncipollo/create-release@v1
       with:
-        tag: ${{ github.ref_name }}
+        tag:  ${{ github.ref_name }}
         name: EnvDoc v${{ steps.extract-release-notes.outputs.version }}
-        bodyFile: release_notes.md
-        draft: false
+        bodyFile:  release_notes.md
+        draft:  false
         prerelease: false
         token: ${{ secrets.GITHUB_TOKEN }}
 
